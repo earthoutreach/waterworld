@@ -8,7 +8,7 @@
   <script type="text/javascript" src="https://raw.githubusercontent.com/lodash/lodash/3.10.1/lodash.min.js"></script> 
   
   <!-- Load the Google AJAX API loader. -->
-  <script type="text/javascript" src="http://www.google.com/jsapi?hl=en&amp;key=ABQIAAAAwbkbZLyhsmTCWXbTcjbgbRSzHs7K5SvaUdm8ua-Xxy_-2dYwMxQMhnagaawTo7L1FE1-amhuQxIlXw"></script>
+  <script type="text/javascript" src="https://www.google.com/jsapi?hl=en&amp;key=ABQIAAAAwbkbZLyhsmTCWXbTcjbgbRSzHs7K5SvaUdm8ua-Xxy_-2dYwMxQMhnagaawTo7L1FE1-amhuQxIlXw"></script>
   
   <!-- GeoHash library for converting lat/lon to a geohash. -->
   <script type="text/javascript" src="https://rawgit.com/chrisveness/latlon-geohash/master/latlon-geohash.js"></script> 
@@ -53,7 +53,7 @@
 '    <Model>' + 
 '      <altitudeMode>absolute</altitudeMode>' + 
 '      <Link>' + 
-'        <href>./water_textured.dae</href>' + 
+'        <href>https://rawgit.com/earthoutreach/waterworld/master/water_textured.dae</href>' + 
 '      </Link>' + 
 '      <Location>' + 
 '        <latitude>0</latitude>' +
@@ -62,7 +62,7 @@
 '      </Location>' + 
 '      <ResourceMap>' + 
 '        <Alias>' + 
-'          <targetHref>./water_texture.jpg</targetHref>' + 
+'          <targetHref>https://rawgit.com/earthoutreach/waterworld/master/water_texture.jpg</targetHref>' + 
 '          <sourceHref>untitled/texture.jpg</sourceHref>' + 
 '         </Alias>' + 
 '       </ResourceMap>' + 
@@ -234,7 +234,7 @@
     model.setLocation(location);
     
     var link = ge.createLink('');
-    link.setHref('./water_colored.dae');
+    link.setHref('https://rawgit.com/earthoutreach/waterworld/masterwater_colored.dae');
     model.setLink(link);
     
     var placemark = ge.createPlacemark('');
