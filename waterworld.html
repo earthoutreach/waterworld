@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Sea level rise Earth API demo.</title>
+  <meta http-equiv="content-type" content="text/html; charset=utf-8"/>
+  
+  <!-- Using Lodash for a variety of convenience methods, like _.throttle() -->
+  <script type="text/javascript" src="https://raw.githubusercontent.com/lodash/lodash/3.10.1/lodash.min.js"></script> 
+  
+  <!-- Load the Google AJAX API loader. -->
+  <script type="text/javascript" src="http://www.google.com/jsapi?hl=en&amp;key=ABQIAAAAwbkbZLyhsmTCWXbTcjbgbRSzHs7K5SvaUdm8ua-Xxy_-2dYwMxQMhnagaawTo7L1FE1-amhuQxIlXw"></script>
+  
+  <!-- GeoHash library for converting lat/lon to a geohash. -->
+  <script type="text/javascript" src="https://rawgit.com/chrisveness/latlon-geohash/master/latlon-geohash.js"></script> 
+  
+  <!-- 
+    Google Earth Extension/Utility library. Original project hosted on Google
+    Code, which is deprecated, so pulling from a backup-copy on GitHub.
+    
+    This is only used to animate the sea-level rise and can be dropped if the
+    animation isn't desired.
+  -->
+  <script type="text/javascript" src="https://cdn.rawgit.com/earthoutreach/earth-api-utility-library/master/extensions/dist/extensions.js"></script> 
+  
+  
+  <script type="text/javascript">
+  /* <![CDATA[ */
+  
+  // Magic names for use as object keys.
+  var LATITUDE = 'latitude';
+  var LONGITUDE = 'longitude';
+  var ALTITUDE = 'altitude';
+  
+  // In order to speed the calculation of geohashes, we round the coordinates
+  // to two digits and memorize the result.
+  var MEMOIZE_COORD_PRECISION = 2;
+  
+  // Geohashes can be arbitrarily long for more precision. Depending on the
+  // desired resolution of the geohash to sea-level mapping, adjust this value.
+  var GEO_HASH_PRECISION = 2;
+  
+  // Stop displaying/adjusting the water model above this altitude.
+  var WATER_DISPLAY_MAX_ALTITUDE = 15000;
+  
+  // How long the sea-level rise animation should take.
+  var WATER_RISE_ANIMATION_TIME = 1500;
+  
+  // The Earth API doesn't have methods for defining model textures, so parsing
+  // a KML string is the only way to get a textured model into the plugin.
+  var TEXTURED_WATER_MODEL = '<?xml version="1.0" encoding="UTF-8"?>' + 
+'<kml xmlns="http://www.opengis.net/kml/2.2">' + 
+'  <Placemark>' + 
+'    <Model>' + 
+'      <altitudeMode>absolute</altitudeMode>' + 
+'      <Link>' + 
+'        <href>./water_textured.dae</href>' + 
+'      </Link>' + 
+'      <Location>' + 
+'        <latitude>0</latitude>' +
+'        <latitude>0</latitude>' + 
+'        <latitude>-10</latitude>' + 
+'      </Location>' + 
+'      <ResourceMap>' + 
+'        <Alias>' + 
+'          <targetHref>./water_texture.jpg</targetHref>' + 
+'          <sourceHref>untitled/texture.jpg</sourceHref>' + 
+'         </Alias>' + 
+'       </ResourceMap>' + 
+'    </Model>' + 
+'  </Placemark>' + 
+'</kml>';
+
+  // Enumeration of modelled temperature increases.
+  var Temp = {
+    C2: 'C2',
+    C4: 'C4'
+  }
+  
+  // Mapping of geohash areas to temperatures and sea-level in meters. This can
+  // be replaced with higher-resolution sea-levels per geohash area. Though not
+  // yet implemented, a fall-back algorithm could be added, which would first
+  // check for higher resolution geohashes, and then fall back to lower
+  // resolution regional or global values.
+  
+  // If the geohash to temp/sea-level mapping doesn't have a value for a
+  // a location, fall back to these values.
+  var FALLBACK_GLOBAL_SEA_LEVEL = {
+    'C2': 3,
+    'C4': 6
+  }
+  
+  // Multi-resolution mapping between geohash locations, temp and sea-level.
+  // TODO: Replace with JSON from a server?
+  var SEA_LEVELS = {
+    'g': {
+      'C2': 3,
+      'C4': 6
+    },
+    'gc': {
+      'C2': 4,
+      'C4': 8
+    },
+    'gc': {
+      'C2': 2,
+      'C4': 4
+    },
+    'gc': {
+      'C2': 5,
+      'C4': 10
+    },
+    'gc': {
+      'C2': 3,
+      'C4': 6
+    }
+  }
+  
+  // Reference to Earth plugin and Earth extensions library.
+  var ge;  
+  var gex;
+
+  // The KML ScreenOverlay that will tint the screen blue while the camera is
+  // below the current sea-level.
+  var gogglesPlacemark;
+  
+  // The KML Placemark/Model that represents the water surface.
+  var waterSurfacePlacmark;
+  
+  // The KML Location element of the water level placemark.
+  var waterSurfaceModelLocation;
+  
+  // Global temperature value which is used to choose the geohashed sea level.  
+  var globalTemp;
+  
+  google.load("earth", "1");
+
+  function init() {
+    google.earth.createInstance('map3d', initCB, failureCB);
+  }
+  
+  function initCB(instance) {
+    ge = instance;
+    gex = new GEarthExtensions(ge);
+    
+    // Enable entering Ground Level view, which allows walking along the ground.
+    // StreetView is disabled below, however, sometimes the plugin still enters
+    // StreetView while entering ground navigation mode. Not sure why.
+    ge.getOptions().setAutoGroundLevelViewEnabled(true);
+    
+    // Turn off StreetView.
+    ge.getNavigationControl().setStreetViewEnabled(false); 
+    
+    // Turn on the navigation controls
+    ge.getNavigationControl().setVisibility(ge.VISIBILITY_AUTO);    
+    
+    // Add borders, roads and 3D Buildings.
+    ge.getLayerRoot().enableLayerById(ge.LAYER_BORDERS, true);
+    ge.getLayerRoot().enableLayerById(ge.LAYER_ROADS, false);
+    ge.getLayerRoot().enableLayerById(ge.LAYER_BUILDINGS, true);
+    
+    // Make the plugin visible.
+    ge.getWindow().setVisibility(true);
+    
+    createModels();  
+    // Set global temp to 2C.    
+    setTemp(Temp.C2);
+    setInitialView();    
+    
+    // Viewchange events are fired almost every time a new frame is rendered.
+    // We use this event to move the water model. However, updating at ~60fps
+    // is overkill, so throttle calls to the model position update method.
+    // viewchangeend could be used instead, but that only fires after the camera
+    // stops moving.
+    google.earth.addEventListener(
+        ge.getView(), 'viewchange', _.throttle(updateWater, 250));
+  }
+  
+  function failureCB(errorCode) {
+  }
+  
+  
+  /**
+   * Sets the initial view of the plugin. Defaulting to London where we have
+   * geohash sea-level coverage.
+   */
+  function setInitialView() {
+    // Somewhere in London.
+    setView(51.5033, -0.1197);
+  }
+  
+  /**
+   * Sets the view of the Earth plugin to a lat/lon.
+   * @param {number} The latitude of the desired water level.
+   * @param {number} The longitude of the desired water level.
+   */
+  function setView(latitude, longitude) {
+    var initialLookAt = ge.createLookAt('');
+    initialLookAt.set(
+      latitude, longitude, 0, ge.ALTITUDE_RELATIVE_TO_GROUND, 0, 60, 5000);
+    ge.getView().setAbstractView(initialLookAt);
+  }
+  
+  /**
+   * Creates the water model Placemark and ScreenOverlay "goggles".
+   */
+  function createModels() {    
+    // Switch the this if you want to try the textured water model instead of
+    // the plain colored/blue one.
+    //waterSurfacePlacmark = getTexturedWaterSuface();
+    waterSurfacePlacmark = getColoredWaterSuface();
+    ge.getFeatures().appendChild(waterSurfacePlacmark);
+    waterSurfaceModelLocation = waterSurfacePlacmark.getGeometry().getLocation();
+    
+    // Create the KML ScreenOverlay that tints the screen blue while underwater.
+    gogglesPlacemark = getGoggles();
+    ge.getFeatures().appendChild(gogglesPlacemark);
+  }  
+  
+  
+  /**
+   * Returns a KML Placemark of a blue tinted 3D model for the water surface.
+   * @return {KMLPlacemark} The KML Placemark for the colored water model. 
+   */
+  function getColoredWaterSuface() {
+    var model = ge.createModel('');   
+    model.setAltitudeMode(ge.ALTITUDE_ABSOLUTE);
+    
+    var scale = ge.createScale('');
+    // The colored water model is a disc (diameter 1m) with a yellow raised
+    // brim. Scale that up to 5000m in diameter and 1000m tall.
+    scale.set(5000, 5000, 1000);
+    model.setScale(scale);
+    
+    var location = ge.createLocation('');    
+    model.setLocation(location);
+    
+    var link = ge.createLink('');
+    link.setHref('./water_colored.dae');
+    model.setLink(link);
+    
+    var placemark = ge.createPlacemark('');
+    placemark.setGeometry(model);
+    return placemark;
+  }
+  
+  
+  /**
+   * Returns a KML Placemark of a textured 3D model for the water surface.
+   * @return {KMLPlacemark} The KML Placemark for the colored water model. 
+   */
+  function getTexturedWaterSuface() {
+    // Since the Earth API doesn't have methods for defining ResourceMaps with
+    // model textures, load the Model from a KML String.
+    var waterSurfacePlacemark = ge.parseKml(TEXTURED_WATER_MODEL);    
+    
+    var model = waterSurfacePlacemark.getGeometry();  
+    
+    // Given the way textures are defined in Collada, we can't make a disc with
+    // diameter 1m. So this Collada model already has a diameter of 5000m.
+    model.getScale().set(1, 1, 1);    
+    return waterSurfacePlacemark;
+  }
+  
+  
+  /**
+   * Returns a KML ScreenOverlay that covers the 3D view with a blue tint.
+   * @return {KMLPlacemark} The KML Placemark for the colored water model. 
+   */
+  function getGoggles() {
+    var goggles = ge.createScreenOverlay(''); 
+    goggles.setVisibility(false);
+    
+    // Size to 100% width & height, and center on the screen.
+    goggles.getSize().set(1, ge.UNITS_FRACTION, 1, ge.UNITS_FRACTION);
+    goggles.getOverlayXY().set(0.5, ge.UNITS_FRACTION, 0.5, ge.UNITS_FRACTION);
+    goggles.getScreenXY().set(0.5, ge.UNITS_FRACTION, 0.5, ge.UNITS_FRACTION);
+    
+    // For now, just tint the color of the screen overlay, without using an
+    // image. Set an href and change color to 'ffffff' to use an image. 
+    goggles.getColor().set('7fff0000');
+    var icon = ge.createIcon('');  
+    icon.setHref('');
+    goggles.setIcon(icon);    
+    
+    ge.getFeatures().appendChild(goggles);
+    return goggles;
+  }
+ 
+ 
+  /**
+   * Updates the water model's location and enables the "goggles" overlay if
+   * underwater.
+   */
+  function updateWater() {
+    // Get the camera's current altitude.
+    var cameraAltitude = getCameraAltitude();
+    
+    // Turn off the water surface if above the WATER_DISPLAY_MAX_ALTITUDE.
+    //
+    // Above ~15km camera altitude on a 1366 pixel wide monitor, the terrain
+    // resolution degrades enough that flooded areas aren't accurate. This is
+    // because Earth switches to lower-resolution terrain meshes when zoomed
+    // out. The ideal altitude value will be for higher-resolution displays, as
+    // Earth determines which resolution imagery/terrain to load based on the
+    // width of the screen and available number of pixels.
+
+    var isWaterVisible = cameraAltitude < WATER_DISPLAY_MAX_ALTITUDE;
+    waterSurfacePlacmark.setVisibility(isWaterVisible);
+    if (!isWaterVisible) {
+      // Return early if the water model isn't visible at this altitude.
+      return;
+    }
+    
+    // Get the current camera LookAt point, so we can move the model there.
+    var lookAt = getLookAtCoordinates(); 
+    
+    // getWaterLevel() is memoizes returned values (based on the rounded lat/lon
+    // values per MEMOIZE_COORD_PRECISION. This prevents calculating the
+    // geohash unnecessarily for small location/camera movements.    
+    var waterLevel = getWaterLevel(lookAt[LATITUDE], lookAt[LONGITUDE]);
+    
+    // Center the water model at the LookAt point and update the water level.
+    waterSurfaceModelLocation.setLatLngAlt(
+        lookAt[LATITUDE], lookAt[LONGITUDE], waterLevel);
+        
+    // If the camera is below the sea-level, turn on the "goggles".
+    var isUnderWater = cameraAltitude <= waterLevel;
+    gogglesPlacemark.setVisibility(isUnderWater);
+  }  
+  
+  
+  /**
+   * Returns the memoized water level for a given lat/lon.
+   * @param {number} The latitude of the desired water level.
+   * @param {number} The longitude of the desired water level.
+   * @return {number} The memoized water level at the given lat/lon.
+   */
+  function getWaterLevel(latitude, longitude) {
+    // Given that sample geohashed sea level rise data is relative
+    // low-resolution, round the incoming lat/lon. 2 digits of precision
+    // provides approximately 1.1km resolution at the equator. See:
+    // https://en.wikipedia.org/wiki/Decimal_degrees
+    // 
+    // This allows us to memoize the geohash encoding call for better
+    // performance. If the precision is increased to 3 or more digits, memoize
+    // might not be a good idea, as it may flood/fill the memoize cache with
+    // too much data.
+    
+    // If calculating geohashes aren't that expensive, especially given that
+    // these requests are throttled, memoize could be dropped.
+    
+    latitude = _.round(latitude, MEMOIZE_COORD_PRECISION);
+    longitude = _.round(longitude, MEMOIZE_COORD_PRECISION);
+    
+    // Get the geohash for this lat/lon.
+    var hashedLocation = geohasher(latitude, longitude);
+    
+    // Set the fallback value first.
+    var seaLevel = FALLBACK_GLOBAL_SEA_LEVEL[globalTemp];
+    var consoleHeader = "Using global fallback";
+    var coordsString = 'global';
+    
+    // Look for this geohash in the temp/sea-level mapping, reducing precision
+    // each round looking for a lower-resolution value.
+    
+    var tempHash = hashedLocation;
+    while (tempHash.length > 0) {
+      if (tempHash in SEA_LEVELS) {
+        seaLevel = SEA_LEVELS[tempHash][globalTemp];
+        var consoleHeader = "Found sea-level";
+        var coordsString = latitude.toString() + ", " + longitude.toString();
+        break;
+      } else {
+        // Reduce the precision of the geohash and check again.
+        tempHash = tempHash.slice(0, - 1);
+      }
+    }
+    
+    document.getElementById("coords").innerHTML = coordsString;
+    document.getElementById("sea-level").innerHTML = seaLevel.toString();
+    
+    console.log(
+          consoleHeader + " @ geohash: " + hashedLocation + " = " + seaLevel);
+    return seaLevel;
+  }
+  
+  /**
+   * Returns the current camera altitude.
+   * @return {number} The altitude of the Earth's current camera position.
+   */
+  function getCameraAltitude() {
+    return ge.getView().copyAsCamera(ge.ALTITUDE_ABSOLUTE).getAltitude();
+  } 
+  
+  
+  /**
+   * Returns an object with Earth's current LookAt lat, lon and altitude.
+   * @return {Object} An object with latitude, longitiude and altitude props.
+   */
+  function getLookAtCoordinates() {
+    var lookAt = ge.getView().copyAsLookAt(ge.ALTITUDE_RELATIVE_TO_GROUND);
+    return _.zipObject(
+      [LATITUDE, LONGITUDE, ALTITUDE],
+      [lookAt.getLatitude(), lookAt.getLongitude(), lookAt.getAltitude()]);
+  }
+  
+
+  /**
+   * Returns the memoized geohash for a given latitude, longitude coordinate.
+   * @return {String} The geohash for the given coordinate.
+   */
+  var geohasher = _.memoize(function(latitude, longitude) {    
+    // GEO_HASH_PRECISION will need to be increased if higher resolution data
+    // is added to the mapping between geohashes, temperature and sea-level.
+    var hash = Geohash.encode(latitude, longitude, GEO_HASH_PRECISION);
+    
+    console.log('Geohash for: ', latitude + "," + longitude + " = " + hash);
+    return hash;
+  }, resolver);
+  
+  
+  /**
+   * A memoize resolver that uses both lat * long to calculate the cache key.
+   *
+   * By default, Lodash's memoize function only caches the value based on the
+   * first parameter. We need cache keys to be created from both.
+   * @return {String} A string that is simply the concatenation of lat & long.
+   */
+  function resolver(latitude, longitude) {
+    // By default _.memoize() uses the first argument as the cache key, so
+    // let's so better by using our creating our own key resolver.
+    return latitude.toString() + longitude.toString();
+  }
+  
+  
+  /**
+   * Sets the global temperate value and animates the water level.
+   */
+  function setTemp(temp) {
+    globalTemp = temp;
+    
+    // Animate the sea-level change for this temperature. This could be replaced
+    // with a simple function that just changes the model altitude, instead of
+    // a fancy animation.
+    document.getElementById("temp").innerHTML = temp;
+    animateWaterLevel();
+  }
+  
+  
+  /**
+   * Animates the altitude of the water model when switching between temps.
+   *
+   * This isn't strictly necessary, but makes for a nice on-screen animation.
+   * This is the only reason we use the Earth extension library.
+   */
+  function animateWaterLevel() {
+    // Get the camera's current LookAt location and the water level there.
+    var lookAt = getLookAtCoordinates(); 
+    var waterLevel = getWaterLevel(lookAt[LATITUDE], lookAt[LONGITUDE]);
+
+    var location = waterSurfaceModelLocation;
+    var anim = new gex.fx.animateProperty(location, ALTITUDE, {
+        duration: WATER_RISE_ANIMATION_TIME,
+        end: waterLevel, // could also use delta
+        easing: 'both',
+        callback: function() {
+          setTimeout(function() {
+            // Restore mouse navigation after the animation is done.
+            gex.util.takeOverCamera(false);
+          }, 0);
+        }
+      });
+      
+    // Turn off mouse navigation so the user can't move the Earth while the
+    // animation is running. This prevents accidentally kicking off concurrent
+    // animations.
+    gex.util.takeOverCamera();
+    anim.start();
+    
+    // Ensure that animation stops/finishes 50ms after the expected time. Not
+    // sure if this is necessary, but some of the GEX code samples do it.
+    setTimeout(function(){ anim.stop(); }, WATER_RISE_ANIMATION_TIME + 50);
+  }
+  
+  // Geocoding example taken from: 
+  // https://developers.google.com/maps/documentation/javascript/examples/geocoding-simple
+  
+  function initSearchBox() {
+    var geocoder = new google.maps.Geocoder();
+    document.getElementById('submit').addEventListener('click', function() {
+    geocodeAddress(geocoder);
+    });
+  }
+  
+  function geocodeAddress(geocoder) {
+    var address = document.getElementById('address').value;
+    geocoder.geocode({'address': address}, function(results, status) {
+      if (status === google.maps.GeocoderStatus.OK) {
+        var coord = results[0].geometry.location;
+        setView(coord.lat(), coord.lng());
+      } else {
+        alert('Geocode was not successful for the following reason: ' + status);
+      }
+    });
+  }
+
+  
+  /* ]]> */
+  </script>
+</head>
+<body onload="init();">
+  <div>
+    <input id="address" type="textbox" value="London">
+    <input id="submit" type="button" value="Geocode">
+    <input type="button" onclick="setTemp(Temp.C2);" value="2degC">
+    <input type="button" onclick="setTemp(Temp.C4);" value="4degC">
+    Sea-level at <span id="coords">_</span> is <span id="sea-level">_</span> meters with +<span id="temp">_</span>
+  </div>
+  <div id="ui" style="position: relative;">
+    <div id="map3d" style="border: 1px solid silver; width: 100%; height: 600px;"></div>
+  </div>
+   <!-- 
+    Please create your own Maps API key so you can host this on your own site.
+    AIzaSyA4PfMXkesxZk6NtaK2IUtgtXK5SGowEuI
+  -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyA4PfMXkesxZk6NtaK2IUtgtXK5SGowEuI&signed_in=false&callback=initSearchBox"></script>
+</body>
+</html>
